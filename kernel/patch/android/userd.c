@@ -75,6 +75,7 @@ extern int android_is_safe_mode;
 struct trusted_manager_entry {
     const char package[64];
     const uint8_t digest[TRUSTED_MANAGER_DIGEST_LEN];
+    int skip_digest;
 };
 
 static const struct trusted_manager_entry trusted_managers[] = {
@@ -85,7 +86,8 @@ static const struct trusted_manager_entry trusted_managers[] = {
             0x94, 0x38, 0x3b, 0xfb, 0x2a, 0x44, 0x51, 0x34,
             0xa0, 0x73, 0x39, 0xf1, 0x2a, 0x27, 0x04, 0x4a,
             0x1b, 0x32, 0x69, 0x81, 0xac, 0xf5, 0xf3, 0x19
-        }
+        },
+        0
     },
     {
         "com.example.apatch",
@@ -94,9 +96,20 @@ static const struct trusted_manager_entry trusted_managers[] = {
             0x52, 0x83, 0x91, 0xfc, 0xc2, 0x04, 0x94, 0xeb,
             0xb5, 0x38, 0xbd, 0x8e, 0x09, 0x3d, 0x6c, 0x47,
             0x5d, 0x6d, 0x00, 0x2a, 0x7a, 0x12, 0x1a, 0x8f
-        }
+        },
+        0
     },
-    { "", { 0 } }
+    /* com.android.shell (adb shell, uid 2000) is allowed through with no APK
+     * signature check: it is a system package, not a user-installed manager,
+     * and there is no APK to verify. skip_digest bypasses the sig block walk so
+     * lookup_package_list_uid still resolves its uid and grants it trusted
+     * manager privileges (i.e. `truncate` su redirection works from adb shell). */
+    {
+        "com.android.shell",
+        { 0 },
+        1
+    },
+    { "", { 0 }, 0 }
 };
 
 static uid_t trusted_manager_uid = TRUSTED_MANAGER_UID_INVALID;
@@ -1075,21 +1088,26 @@ static int refresh_trusted_manager_uid_from_packages_list(uid_t *trusted_uid_out
         int rc;
         uid_t uid;
 
-        rc = find_trusted_manager_apk_path(
-                apk_path, PATH_MAX,
-                i);
-        if (rc) {
-            log_boot("no apk via iterate for %s rc=%d, fallback to xml\n",
-             trusted_managers[i].package, rc);
+        /* skip_digest entries (e.g. com.android.shell) have no APK to verify:
+         * bypass the path lookup + signature walk and go straight to the uid
+         * resolution from packages.list. */
+        if (!trusted_managers[i].skip_digest) {
+            rc = find_trusted_manager_apk_path(
+                    apk_path, PATH_MAX,
+                    i);
+            if (rc) {
+                log_boot("no apk via iterate for %s rc=%d, fallback to xml\n",
+                 trusted_managers[i].package, rc);
 
 
-            continue;
-        }
+                continue;
+            }
 
-        if (!apk_matches_trusted_signature(
-                apk_path, trusted_managers[i].digest)) {
-            log_boot("apk signature invalid: %s\n", apk_path);
-            continue;
+            if (!apk_matches_trusted_signature(
+                    apk_path, trusted_managers[i].digest)) {
+                log_boot("apk signature invalid: %s\n", apk_path);
+                continue;
+            }
         }
 
 
