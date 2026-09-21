@@ -79,6 +79,14 @@ endif
 
 ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-variable
 ccflags-y += -Wno-int-conversion -Wno-gcc-compat -Wno-missing-prototypes
+# Disable all UBSan bounds/object-size checks: with CONFIG_UBSAN_TRAP=y the
+# kernel turns clang's brk #0x800 (UBSAN_BOUNDS) into a hard panic. Modules
+# built against an older kernel tree still inherit the sanitizer inline
+# traps from the toolchain; without this the ko panics on the first
+# pointer-arith memcpy (kp_kstorage_write) at load time. Also drop the
+# trap form so any residual check fails soft instead of brk.
+ccflags-y += -fno-sanitize=undefined -fno-sanitize=bounds,local-bounds,array-bounds,object-size,pointer-overflow,alignment,null
+ccflags-y += -fno-sanitize-trap=all
 
 # The reused hook engine invokes raw KPM callbacks and relocated kernel text;
 # neither participates in the LKM CFI jump table.
