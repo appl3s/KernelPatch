@@ -16,6 +16,7 @@
 
 #include "../include/kp_lkm.h"
 #include "../include/sha256.h"
+#include "../infra/kfuncs.h"
 
 #define APK_SIG_BLOCK_MAGIC "APK Sig Block 42"
 #define APK_SIG_BLOCK_MAGIC_LEN 16
