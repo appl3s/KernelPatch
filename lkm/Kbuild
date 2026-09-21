@@ -113,6 +113,7 @@ kcfi-disable = $(call cc-option,-fno-sanitize=kcfi)
 CFLAGS_kpm/symbols.o += $(kcfi-disable)
 CFLAGS_kpm/module.o += $(kcfi-disable)
 CFLAGS_infra/secpass.o += $(kcfi-disable)
+CFLAGS_infra/patch_memory.o += $(kcfi-disable)
 CFLAGS_hook/hook_engine.o += $(kcfi-disable)
 CFLAGS_hook/hook_runtime.o += $(kcfi-disable)
 # kstorage invokes an iterator callback supplied by a KPM image; without
