@@ -69,16 +69,22 @@ int kp_accctl_init(void)
 }
 
 /* LKM mode ships no sepolicy patch, so u:r:kp:s0 is absent; on non-Magisk
- * devices u:r:magisk:s0 is absent too. Probe both and cache the first that
- * security_secctx_to_secid can resolve. Returns NULL if neither exists, in
- * which case kp_commit_su grants uid 0 + full caps on the caller's current
- * domain (no translabel). u:r:kernel:s0 is deliberately excluded: it cannot
- * connect sockets or run ART, so keeping the caller's own domain is better. */
+ * devices u:r:magisk:s0 is absent too. Probe in order and cache the first that
+ * security_secctx_to_secid can resolve:
+ *   1. u:r:kp:s0     — ideal, but needs KP's sepolicy patch (absent in LKM)
+ *   2. u:r:magisk:s0 — ideal, but needs Magisk installed
+ *   3. u:r:kernel:s0 — always present; can do file/setenforce/insmod but cannot
+ *                      connect sockets or run ART. Used as last resort because
+ *                      the caller's own domain (e.g. u:r:shell:s0) is more
+ *                      restrictive: even `cd /data/adb` is denied there.
+ * Returns NULL only if selinux_blob_sizes is unresolved, in which case
+ * kp_commit_su grants uid 0 + full caps with no translabel. */
 const char *kp_get_available_sctx(void)
 {
 	static const char *const candidates[] = {
 		ALL_ALLOW_SCONTEXT,	 /* u:r:kp:s0 */
 		ALL_ALLOW_SCONTEXT_MAGISK, /* u:r:magisk:s0 */
+		ALL_ALLOW_SCONTEXT_KERNEL, /* u:r:kernel:s0 */
 	};
 	static char cached[SUPERCALL_SCONTEXT_LEN];
 	static bool probed;
@@ -99,7 +105,7 @@ const char *kp_get_available_sctx(void)
 			return cached;
 		}
 	}
-	logkw("no usable selinux domain (kp/magisk both absent); root keeps caller domain\n");
+	logkw("no usable selinux domain; root keeps caller domain\n");
 	return NULL;
 }
 
