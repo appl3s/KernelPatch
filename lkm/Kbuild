@@ -82,9 +82,13 @@ ccflags-y += -Wno-int-conversion -Wno-gcc-compat -Wno-missing-prototypes
 # CFI_CLANG=y non-permissive (6.12 GKI). Runtime-resolved kernel pointers
 # called indirectly (kp_* wrappers, kfunc slots, KPM callbacks) trip kCFI
 # type-signature checks and panic via brk #0x800 before the secpass bypass
-# is in place. Disable CFI/kCFI for the whole module and SCS (x18 is not
-# the module's shadow stack when running from hooked kernel text).
-ccflags-y += -fno-sanitize=cfi -fno-lto
+# is in place. Disable CFI for the whole module and SCS (x18 is not the
+# module's shadow stack when running from hooked kernel text). Do NOT add a
+# global -fno-lto: android12-5.10 has CONFIG_LTO_CLANG=y and the kernel's
+# LTO link step (LTO [M]) fights a global -fno-lto, surfacing a modpost
+# section mismatch on __cfi_jt_init_module. LTO stays off only per-object
+# (hook_engine below); 6.12 has no LTO so -fno-sanitize=cfi alone is fine.
+ccflags-y += -fno-sanitize=cfi
 ccflags-y += -fno-sanitize=shadow-call-stack
 
 # The reused hook engine invokes raw KPM callbacks and relocated kernel text;
