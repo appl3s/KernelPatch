@@ -102,14 +102,18 @@ CFLAGS_infra/secpass.o += -fno-sanitize=cfi
 # Per-object kCFI disable: these objects make indirect calls through
 # runtime-resolved kernel function pointers or KPM-supplied callbacks that
 # have no kCFI type hash the check can match. Mirrors KernelPatchKO's PLD110.
-CFLAGS_kpm/symbols.o += -mbranch-protection=bti -fno-stack-protector -fno-sanitize=kcfi
-CFLAGS_kpm/module.o += -mbranch-protection=bti -fno-sanitize=kcfi
-CFLAGS_infra/secpass.o += -fno-sanitize=kcfi
-CFLAGS_hook/hook_engine.o += -fno-sanitize=kcfi
-CFLAGS_hook/hook_runtime.o += -fno-sanitize=kcfi
+# kcfi is gated behind cc-option: android13-5.10's clang-14 rejects
+# -fno-sanitize=kcfi ("unsupported argument"), while android16-6.12 needs it
+# (CONFIG_CFI_CLANG=y trips brk #0x800 without it).
+kcfi-disable = $(call cc-option,-fno-sanitize=kcfi)
+CFLAGS_kpm/symbols.o += -mbranch-protection=bti -fno-stack-protector $(kcfi-disable)
+CFLAGS_kpm/module.o += -mbranch-protection=bti $(kcfi-disable)
+CFLAGS_infra/secpass.o += $(kcfi-disable)
+CFLAGS_hook/hook_engine.o += $(kcfi-disable)
+CFLAGS_hook/hook_runtime.o += $(kcfi-disable)
 # kstorage invokes an iterator callback supplied by a KPM image; without
 # kcfi off the indirect call trips brk #0x800 at kp_kstorage_write on load.
-CFLAGS_supercall/kstorage.o += -fno-sanitize=kcfi
+CFLAGS_supercall/kstorage.o += $(kcfi-disable)
 # _transit4 runs from a kernel text function's inline hook; x18 there is NOT the
 # module's shadow-call-stack. Disable SCS so the transit never writes x30 through
 # x18 (str x30,[x18]) into garbage -> CPU fault -> watchdog bite on that core.
