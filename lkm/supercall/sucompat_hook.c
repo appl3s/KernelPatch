@@ -94,7 +94,7 @@ static long kp_redirect_to_sh(const struct pt_regs *regs, const char *what, uid_
 	bool use_apd = false;
 
 	logki("execve %s by uid %u: granting root (sctx=%s)\n", what, uid,
-	      sctx ? sctx : "(kernel)");
+	      sctx ? sctx : "(none)");
 	kp_commit_su(0, sctx);
 
 	/* apd is the full su daemon (handles -c/-s/-u/-l/-p/pty), so a real su
@@ -225,7 +225,9 @@ static int kp_hook_getname_flags(void)
 	return hook_wrap3((void *)addr, 0, kp_after_getname_flags, 0);
 }
 
-/* Default SELinux context */
+/* Default SELinux context. Returns the per-uid profile sctx if set, else the
+ * probed domain (u:r:kp:s0 / u:r:magisk:s0), else NULL — kp_commit_su then
+ * grants uid 0 + full caps on the caller's current domain. */
 static const char *kp_default_sctx(uid_t uid)
 {
 	static char sctx[SUPERCALL_SCONTEXT_LEN];
@@ -235,7 +237,7 @@ static const char *kp_default_sctx(uid_t uid)
 		strscpy(sctx, profile.scontext, sizeof(sctx));
 		return sctx;
 	}
-	return ALL_ALLOW_SCONTEXT_MAGISK;
+	return kp_get_available_sctx();
 }
 
 static long kp_execve_handler(const struct pt_regs *regs)

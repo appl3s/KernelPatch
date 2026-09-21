@@ -62,7 +62,45 @@ int kp_accctl_init(void)
 		return 0;
 	}
 	logki("selinux blob sizes: lbs_cred=%d\n", kp_selinux_blob_sizes->lbs_cred);
+	/* Probe and cache the first usable SELinux domain now, so the su allowlist
+	 * and kp_commit_su see a stable answer without re-probing on every exec. */
+	kp_get_available_sctx();
 	return 0;
+}
+
+/* LKM mode ships no sepolicy patch, so u:r:kp:s0 is absent; on non-Magisk
+ * devices u:r:magisk:s0 is absent too. Probe both and cache the first that
+ * security_secctx_to_secid can resolve. Returns NULL if neither exists, in
+ * which case kp_commit_su grants uid 0 + full caps on the caller's current
+ * domain (no translabel). u:r:kernel:s0 is deliberately excluded: it cannot
+ * connect sockets or run ART, so keeping the caller's own domain is better. */
+const char *kp_get_available_sctx(void)
+{
+	static const char *const candidates[] = {
+		ALL_ALLOW_SCONTEXT,	 /* u:r:kp:s0 */
+		ALL_ALLOW_SCONTEXT_MAGISK, /* u:r:magisk:s0 */
+	};
+	static char cached[SUPERCALL_SCONTEXT_LEN];
+	static bool probed;
+	u32 sid = 0;
+	int i;
+
+	if (probed)
+		return cached[0] ? cached : NULL;
+	probed = true;
+
+	if (!kp_selinux_blob_sizes)
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(candidates); i++) {
+		if (!kp_security_secctx_to_secid(candidates[i], strlen(candidates[i]), &sid) && sid) {
+			strscpy(cached, candidates[i], sizeof(cached));
+			logki("available selinux domain: %s\n", cached);
+			return cached;
+		}
+	}
+	logkw("no usable selinux domain (kp/magisk both absent); root keeps caller domain\n");
+	return NULL;
 }
 
 /* Translabel a freshly-prepared cred to the given SELinux context (5.15 has no
@@ -149,37 +187,40 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 	/* Disable seccomp on the caller, matching KP's commit_common_su. */
 	current_thread_info()->flags &= ~_TIF_SECCOMP;
 
-	/* Empty sctx: default to the magisk domain (KP initializes all_allow_sctx
-	 * to ALL_ALLOW_SCONTEXT_MAGISK). The u:r:kernel:s0 domain cannot connect
-	 * sockets or run ART (seen: libsu RootServer ClassNotFoundException after
-	 * Natives.su(0,null) granted kernel cred). Use the fully-qualified
-	 * u:r:magisk:s0, resolved via security_secctx_to_secid. Fall back to
-	 * kernel cred only if the domain is unavailable. */
+	/* Empty sctx: pick the first probed SELinux domain (u:r:kp:s0 or
+	 * u:r:magisk:s0). If neither exists — the common LKM case on a non-Magisk
+	 * device, since LKM mode ships no sepolicy patch — grant uid 0 + full caps
+	 * on the caller's current domain. prepare_kernel_cred(NULL) is deprecated
+	 * since 6.2 (it WARNs and returns NULL on 6.12), so the fallback builds
+	 * the root cred from prepare_creds() + su_cred() instead. */
 	if (!sctx || !sctx[0]) {
-		if (kp_selinux_blob_sizes) {
-			rc = commit_common_su(to_uid, ALL_ALLOW_SCONTEXT_MAGISK);
+		const char *avail = kp_get_available_sctx();
+		if (avail && kp_selinux_blob_sizes) {
+			rc = commit_common_su(to_uid, avail);
 			if (!rc) {
-				logki("commit_su: to_uid=%u magisk domain\n", to_uid);
+				logki("commit_su: to_uid=%u domain %s\n", to_uid, avail);
 				return 0;
 			}
-			logkw("magisk domain translabel failed (%d), kernel cred fallback\n", rc);
+			logkw("domain %s translabel failed (%d), cred fallback\n", avail, rc);
 		}
-		struct cred *new = prepare_kernel_cred(NULL);
+		struct cred *new = kp_prepare_creds();
 		if (!new)
 			return -ENOMEM;
+		su_cred(new, to_uid);
 		kp_commit_creds(new);
-		logki("commit_su: to_uid=%u kernel cred (u:r:kernel:s0)\n", to_uid);
+		logki("commit_su: to_uid=%u cred fallback (no selinux domain)\n", to_uid);
 		return 0;
 	}
 
-	/* Explicit sctx: try the translabel, fall back to kernel cred if it fails
-	 * so the caller still gets root. */
+	/* Explicit sctx: try the translabel, fall back to a uid-0 cred on the
+	 * caller's current domain if it fails so the caller still gets root. */
 	rc = commit_common_su(to_uid, sctx);
 	if (rc) {
-		logkw("commit_common_su failed (%d), falling back to kernel cred\n", rc);
-		struct cred *new = prepare_kernel_cred(NULL);
+		logkw("commit_common_su failed (%d), falling back to cred\n", rc);
+		struct cred *new = kp_prepare_creds();
 		if (!new)
 			return -ENOMEM;
+		su_cred(new, to_uid);
 		kp_commit_creds(new);
 		return 0;
 	}

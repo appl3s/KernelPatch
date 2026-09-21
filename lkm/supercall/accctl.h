@@ -14,6 +14,13 @@
 /* Resolve the SELinux translabel helper at init. */
 int kp_accctl_init(void);
 
+/* First SELinux domain that security_secctx_to_secid can resolve, from the
+ * candidates u:r:kp:s0 / u:r:magisk:s0. LKM mode has no sepolicy patch, so on
+ * a non-Magisk device both are absent and this returns NULL — callers then
+ * fall back to a uid-0 cred on the caller's current domain. Cached on first
+ * call. u:r:kernel:s0 is excluded: it cannot connect sockets or run ART. */
+const char *kp_get_available_sctx(void);
+
 /* Grant root to the current task (uid/gid -> to_uid, all caps). */
 int kp_commit_su(uid_t to_uid, const char *sctx);
 

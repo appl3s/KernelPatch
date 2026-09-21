@@ -6,6 +6,7 @@
  * interception hooks are out of scope for the LKM framework).
  */
 #include "sucompat.h"
+#include "accctl.h"
 #include "kstorage.h"
 
 #include <linux/err.h>
@@ -160,11 +161,14 @@ int kp_sucompat_init(void)
 	if (exclude_group < 0)
 		logkw("failed to alloc kstorage group for ap module exclude\n");
 	current_su_path[0] = '\0';
-	/* Shell and root are allowed by default with the magisk domain, matching
-	 * KP's all_allow_sctx = ALL_ALLOW_SCONTEXT_MAGISK. The u:r:kernel:s0
-	 * domain cannot exec /system/bin/sh, so the root shell needs this. */
-	kp_su_add_allow_uid(2000, 0, ALL_ALLOW_SCONTEXT_MAGISK);
-	kp_su_add_allow_uid(0, 0, ALL_ALLOW_SCONTEXT_MAGISK);
+	/* Shell and root are allowed by default. Use the probed SELinux domain
+	 * (u:r:kp:s0 / u:r:magisk:s0) if one exists; otherwise NULL, which makes
+	 * kp_commit_su grant uid 0 + full caps on the caller's current domain —
+	 * LKM mode ships no sepolicy patch, so on a non-Magisk device neither
+	 * named domain exists. */
+	const char *sctx = kp_get_available_sctx();
+	kp_su_add_allow_uid(2000, 0, sctx);
+	kp_su_add_allow_uid(0, 0, sctx);
 	logki("su allowlist ready (group %d)\n", su_group);
 	return 0;
 }
