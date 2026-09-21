@@ -79,14 +79,13 @@ endif
 
 ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-variable
 ccflags-y += -Wno-int-conversion -Wno-gcc-compat -Wno-missing-prototypes
-# Disable all UBSan bounds/object-size checks: with CONFIG_UBSAN_TRAP=y the
-# kernel turns clang's brk #0x800 (UBSAN_BOUNDS) into a hard panic. Modules
-# built against an older kernel tree still inherit the sanitizer inline
-# traps from the toolchain; without this the ko panics on the first
-# pointer-arith memcpy (kp_kstorage_write) at load time. Also drop the
-# trap form so any residual check fails soft instead of brk.
-ccflags-y += -fno-sanitize=undefined -fno-sanitize=bounds,local-bounds,array-bounds,object-size,pointer-overflow,alignment,null
-ccflags-y += -fno-sanitize-trap=all
+# CFI_CLANG=y non-permissive (6.12 GKI). Runtime-resolved kernel pointers
+# called indirectly (kp_* wrappers, kfunc slots, KPM callbacks) trip kCFI
+# type-signature checks and panic via brk #0x800 before the secpass bypass
+# is in place. Disable CFI/kCFI for the whole module and SCS (x18 is not
+# the module's shadow stack when running from hooked kernel text).
+ccflags-y += -fno-sanitize=cfi -fno-lto
+ccflags-y += -fno-sanitize=shadow-call-stack
 
 # The reused hook engine invokes raw KPM callbacks and relocated kernel text;
 # neither participates in the LKM CFI jump table.
@@ -100,6 +99,17 @@ CFLAGS_hook/hook_engine.o += -fno-lto
 # secpass calls kernel function pointers through backup variables; exempt from
 # CFI so the backup calls don't recurse into the CFI slowpath.
 CFLAGS_infra/secpass.o += -fno-sanitize=cfi
+# Per-object kCFI disable: these objects make indirect calls through
+# runtime-resolved kernel function pointers or KPM-supplied callbacks that
+# have no kCFI type hash the check can match. Mirrors KernelPatchKO's PLD110.
+CFLAGS_kpm/symbols.o += -mbranch-protection=bti -fno-stack-protector -fno-sanitize=kcfi
+CFLAGS_kpm/module.o += -mbranch-protection=bti -fno-sanitize=kcfi
+CFLAGS_infra/secpass.o += -fno-sanitize=kcfi
+CFLAGS_hook/hook_engine.o += -fno-sanitize=kcfi
+CFLAGS_hook/hook_runtime.o += -fno-sanitize=kcfi
+# kstorage invokes an iterator callback supplied by a KPM image; without
+# kcfi off the indirect call trips brk #0x800 at kp_kstorage_write on load.
+CFLAGS_supercall/kstorage.o += -fno-sanitize=kcfi
 # _transit4 runs from a kernel text function's inline hook; x18 there is NOT the
 # module's shadow-call-stack. Disable SCS so the transit never writes x30 through
 # x18 (str x30,[x18]) into garbage -> CPU fault -> watchdog bite on that core.

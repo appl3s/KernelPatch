@@ -19,7 +19,7 @@ struct kp_kstorage
 	int gid;
 	long did;
 	int dlen;
-	char data[];
+	char data[0];
 };
 
 /* Allocate the next free group id (0..KP_KSTORAGE_MAX_GROUP_NUM-1). */
