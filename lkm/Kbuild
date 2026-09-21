@@ -8,6 +8,7 @@ obj-$(CONFIG_KP_LKM) += kernelpatch.o
 kernelpatch-objs := \
 	core/init.o \
 	infra/symbol_resolver.o \
+	infra/kfuncs.o \
 	infra/patch_memory.o \
 	infra/syscall_table.o \
 	infra/sha256.o \

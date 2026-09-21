@@ -14,6 +14,7 @@
 #include <linux/types.h>
 
 #include "../include/kp_lkm.h"
+#include "symbol_resolver.h"
 #include "../kpm/module.h"
 #include <hook.h>
 
@@ -129,7 +130,7 @@ int kp_bypass_kcfi(void)
 {
 	int rc = 0;
 
-	unsigned long addr = kallsyms_lookup_name("find_check_fn");
+	unsigned long addr = kp_resolve_symbol("find_check_fn");
 	if (addr) {
 		kp_find_check_fn_addr = addr;
 		rc = hook((void *)addr, (void *)__replace_find_check_fn,
@@ -140,7 +141,7 @@ int kp_bypass_kcfi(void)
 		logkw("find_check_fn not found; KPM kallsyms CFI check unshielded\n");
 	}
 
-	addr = kallsyms_lookup_name("report_cfi_failure");
+	addr = kp_resolve_symbol("report_cfi_failure");
 	if (addr) {
 		kp_report_cfi_failure_addr = addr;
 		rc = hook((void *)addr, (void *)__replace_report_cfi_failure,
@@ -149,9 +150,9 @@ int kp_bypass_kcfi(void)
 			logkw("hook report_cfi_failure error: %d\n", rc);
 	}
 
-	addr = kallsyms_lookup_name("__cfi_slowpath_diag");
+	addr = kp_resolve_symbol("__cfi_slowpath_diag");
 	if (!addr)
-		addr = kallsyms_lookup_name("__cfi_slowpath");
+		addr = kp_resolve_symbol("__cfi_slowpath");
 	if (addr) {
 		kp_cfi_slowpath_addr = addr;
 		rc = hook((void *)addr, (void *)__replace_cfi_slowpath,

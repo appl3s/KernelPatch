@@ -20,6 +20,7 @@
 #include <scdefs.h>
 
 #include "../include/kp_lkm.h"
+#include "../infra/kfuncs.h"
 
 #define KP_SU_GROUP 0 /* KSTORAGE_SU_LIST_GROUP */
 #define KP_EXCLUDE_GROUP 1 /* KSTORAGE_EXCLUDE_LIST_GROUP */
@@ -178,7 +179,7 @@ static char *kp_read_config_file(const char *path, loff_t *out_len)
 	loff_t len, pos = 0;
 	char *data;
 
-	filp = filp_open(path, O_RDONLY | O_NOFOLLOW, 0);
+	filp = kp_filp_open(path, O_RDONLY | O_NOFOLLOW, 0);
 	if (IS_ERR(filp)) {
 		logkw("open %s failed: %ld\n", path, PTR_ERR(filp));
 		return NULL;
@@ -196,7 +197,7 @@ static char *kp_read_config_file(const char *path, loff_t *out_len)
 		logkw("%s alloc failed (%lld bytes)\n", path, len);
 		return NULL;
 	}
-	if (kernel_read(filp, data, len, &pos) != len) {
+	if (kp_kernel_read(filp, data, len, &pos) != len) {
 		vfree(data);
 		filp_close(filp, NULL);
 		logkw("read %s failed\n", path);

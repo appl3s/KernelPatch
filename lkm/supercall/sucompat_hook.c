@@ -23,6 +23,8 @@
 #include <scdefs.h>
 
 #include "../include/kp_lkm.h"
+#include "../infra/kfuncs.h"
+#include "../infra/symbol_resolver.h"
 #include "../infra/syscall_table.h"
 #include "../manager/manager.h"
 #include <hook.h>
@@ -104,7 +106,7 @@ static long kp_redirect_to_sh(const struct pt_regs *regs, const char *what, uid_
 	 * apd re-enters userspace dispatch and breaks that bootstrap.  Granted
 	 * applications still need apd so their su arguments are honoured. */
 	if (su_exec && !manager_exec) {
-		fp = filp_open(APD_PATH, O_RDONLY | O_NOFOLLOW, 0);
+		fp = kp_filp_open(APD_PATH, O_RDONLY | O_NOFOLLOW, 0);
 		if (!IS_ERR(fp)) {
 			filp_close(fp, NULL);
 			target = APD_PATH;
@@ -195,8 +197,8 @@ static void kp_after_getname_flags(hook_fargs4_t *args, void *udata)
 		typeof(&getname_kernel) kp_getname;
 		typeof(&putname) kp_putname;
 
-		kp_getname = (typeof(kp_getname))kallsyms_lookup_name("getname_kernel");
-		kp_putname = (typeof(kp_putname))kallsyms_lookup_name("putname");
+		kp_getname = (typeof(kp_getname))kp_resolve_symbol("getname_kernel");
+		kp_putname = (typeof(kp_putname))kp_resolve_symbol("putname");
 		if (kp_getname && kp_putname) {
 			struct filename *nf = kp_getname(sh_path);
 			if (!IS_ERR_OR_NULL(nf)) {
@@ -211,9 +213,9 @@ static int kp_hook_getname_flags(void)
 {
 	unsigned long addr;
 
-	addr = kallsyms_lookup_name("__original_getname_flags");
+	addr = kp_resolve_symbol("__original_getname_flags");
 	if (!addr)
-		addr = kallsyms_lookup_name("getname_flags");
+		addr = kp_resolve_symbol("getname_flags");
 	if (!addr) {
 		logki("sucompat: getname_flags not found, path-probe unavailable\n");
 		return -ENOENT;

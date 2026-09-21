@@ -30,20 +30,70 @@
 #ifndef KP_NEW_DCACHE_FLUSH
 #define KP_NEW_DCACHE_FLUSH 0
 #endif
+
+/* None of __set_fixmap / copy_to_kernel_nofault / the dcache flush helpers are
+ * exported to modules on this kernel, so they cannot be linked directly. Each
+ * is resolved by name at kp_patch_memory_init() and called through a function
+ * pointer, keeping the .ko free of UND references to them. */
+typedef void (*kp_set_fixmap_t)(enum fixed_addresses idx, phys_addr_t phys, pgprot_t prot);
+typedef long (*kp_copy_to_kernel_nofault_t)(void *dst, const void *src, size_t size);
+typedef void (*kp_dcache_clean_inval_poc_t)(unsigned long start, unsigned long end);
+typedef void (*kp_caches_clean_inval_pou_t)(unsigned long start, unsigned long end);
+typedef void (*kp_flush_dcache_area_t)(void *start, size_t size);
+typedef void (*kp_flush_icache_range_t)(unsigned long start, unsigned long end);
+
+static kp_set_fixmap_t kp___set_fixmap;
+static kp_copy_to_kernel_nofault_t kp_copy_to_kernel_nofault;
+static kp_dcache_clean_inval_poc_t kp_dcache_clean_inval_poc;
+static kp_caches_clean_inval_pou_t kp_caches_clean_inval_pou;
+static kp_flush_dcache_area_t kp___flush_dcache_area;
+static kp_flush_icache_range_t kp___flush_icache_range;
+
+/* set_fixmap_offset(idx, phys) = __set_fixmap(idx, phys, PAGE_KERNEL) then
+ * fix_to_virt(idx) + (phys & ~PAGE_MASK). fix_to_virt is a pure arithmetic
+ * macro (no external symbol), so reimplementing it here avoids any UND
+ * reference to the inline set_fixmap_offset wrapper. Returns NULL if the
+ * fixmap primitive was not resolved. */
+__attribute__((no_sanitize("cfi")))
+static void *kp_set_fixmap_offset(enum fixed_addresses idx, phys_addr_t phys)
+{
+	if (!kp___set_fixmap)
+		return NULL;
+	kp___set_fixmap(idx, phys, PAGE_KERNEL);
+	return (void *)(fix_to_virt(idx) + (phys & ~PAGE_MASK));
+}
+
+__attribute__((no_sanitize("cfi")))
+static void kp_clear_fixmap(enum fixed_addresses idx)
+{
+	if (kp___set_fixmap)
+		kp___set_fixmap(idx, 0, __pgprot(0));
+}
+
 #if KP_NEW_DCACHE_FLUSH
 #define kp_flush_dcache(start, sz)                                                    \
 	({                                                                               \
 		unsigned long __start = (start);                                         \
-		dcache_clean_inval_poc(__start, __start + (sz));                         \
+		if (kp_dcache_clean_inval_poc)                                           \
+			kp_dcache_clean_inval_poc(__start, __start + (sz));              \
 	})
 #define kp_flush_icache(start, end)                                                    \
 	({                                                                               \
 		unsigned long __start = (start);                                         \
-		caches_clean_inval_pou(__start, (end));                                  \
+		if (kp_caches_clean_inval_pou)                                           \
+			kp_caches_clean_inval_pou(__start, (end));                       \
 	})
 #else
-#define kp_flush_dcache(start, sz) __flush_dcache_area((void *)(start), (sz))
-#define kp_flush_icache(start, end) __flush_icache_range((start), (end))
+#define kp_flush_dcache(start, sz)                                                    \
+	({                                                                               \
+		if (kp___flush_dcache_area)                                             \
+			kp___flush_dcache_area((void *)(start), (sz));                   \
+	})
+#define kp_flush_icache(start, end)                                                    \
+	({                                                                               \
+		if (kp___flush_icache_range)                                            \
+			kp___flush_icache_range((start), (end));                         \
+	})
 #endif
 
 /* Resolve the physical address of a kernel VA through init_mm's page tables.
@@ -105,9 +155,14 @@ static int kp_patch_data(void *dst, const void *src, size_t len)
 		return -ENOENT;
 	}
 	unsigned long phy_off = phy & ~PAGE_MASK;
-	void *map = (void *)set_fixmap_offset(FIX_TEXT_POKE0, phy & PAGE_MASK) + phy_off;
-	int ret = (int)copy_to_kernel_nofault(map, src, len);
-	clear_fixmap(FIX_TEXT_POKE0);
+	void *map = kp_set_fixmap_offset(FIX_TEXT_POKE0, phy & PAGE_MASK);
+	if (!map) {
+		logke("no fixmap for data patch dst 0x%lx\n", (unsigned long)dst);
+		return -ENOENT;
+	}
+	map = (void *)((char *)map + phy_off);
+	int ret = (int)kp_copy_to_kernel_nofault(map, src, len);
+	kp_clear_fixmap(FIX_TEXT_POKE0);
 	if (!ret)
 		kp_flush_dcache((unsigned long)dst, len);
 	return ret;
@@ -122,6 +177,24 @@ int kp_patch_memory_init(void)
 	kp_patch_init_mm = (struct mm_struct *)kp_resolve_symbol("init_mm");
 	if (!kp_patch_init_mm)
 		logkw("failed to resolve init_mm; data (sys_call_table) patch disabled\n");
+
+	/* __set_fixmap / copy_to_kernel_nofault / dcache flush helpers are not
+	 * exported on this kernel; resolve them by name so the fixmap poke path
+	 * works without any UND reference. Missing any of these disables the
+	 * corresponding patch path (returned to the caller as -ENOENT at use). */
+	kp___set_fixmap = (kp_set_fixmap_t)kp_resolve_symbol("__set_fixmap");
+	if (!kp___set_fixmap)
+		logkw("failed to resolve __set_fixmap; fixmap poke disabled\n");
+	kp_copy_to_kernel_nofault = (kp_copy_to_kernel_nofault_t)kp_resolve_symbol("copy_to_kernel_nofault");
+	if (!kp_copy_to_kernel_nofault)
+		logkw("failed to resolve copy_to_kernel_nofault; fixmap poke disabled\n");
+#if KP_NEW_DCACHE_FLUSH
+	kp_dcache_clean_inval_poc = (kp_dcache_clean_inval_poc_t)kp_resolve_symbol("dcache_clean_inval_poc");
+	kp_caches_clean_inval_pou = (kp_caches_clean_inval_pou_t)kp_resolve_symbol("caches_clean_inval_pou");
+#else
+	kp___flush_dcache_area = (kp_flush_dcache_area_t)kp_resolve_symbol("__flush_dcache_area");
+	kp___flush_icache_range = (kp_flush_icache_range_t)kp_resolve_symbol("__flush_icache_range");
+#endif
 	logki("patch memory ready (fixmap poke; aarch64_insn_patch_text not used)\n");
 	return 0;
 }

@@ -12,8 +12,10 @@
 #define _KP_LKM_SYMBOL_RESOLVER_H_
 #include <linux/types.h>
 
-/* Initialize the resolver (recover kallsyms_on_each_symbol). */
-void kp_symres_init(void);
+/* Initialize the resolver (recover kallsyms_on_each_symbol). Returns -EINVAL
+ * when the `kln=` module_param (kallsyms_lookup_name address from
+ * /proc/kallsyms) is missing. */
+int kp_symres_init(void);
 
 /* Exact-name kernel symbol lookup. Returns 0 if not found. */
 unsigned long kp_resolve_symbol(const char *name);

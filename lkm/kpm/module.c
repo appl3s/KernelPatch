@@ -32,6 +32,8 @@
 #include <asm/tlbflush.h>
 
 #include "../include/kp_lkm.h"
+#include "../infra/symbol_resolver.h"
+#include "../infra/kfuncs.h"
 
 #define SZ_128M 0x08000000
 
@@ -390,7 +392,7 @@ static int simplify_symbols(struct kp_module *mod, struct kp_load_info *info)
 		{
 			unsigned long addr = kp_kpm_symbol_lookup(name);
 			if (!addr)
-				addr = kallsyms_lookup_name(name);
+				addr = kp_resolve_symbol(name);
 			if (!addr) {
 				logke("unknown symbol: %s\n", name);
 				if (!info->info.error_msg[0])
@@ -896,7 +898,7 @@ long kp_load_module_path(const char *path, const char *args, void __user *reserv
 		return rc;
 	}
 
-	struct file *filp = filp_open(path, O_RDONLY, 0);
+	struct file *filp = kp_filp_open(path, O_RDONLY, 0);
 	if (unlikely(!filp || IS_ERR(filp))) {
 		logkfe("open module: %s error\n", path);
 		rc = PTR_ERR(filp);
@@ -916,7 +918,7 @@ long kp_load_module_path(const char *path, const char *args, void __user *reserv
 	memset(data, 0, len);
 
 	loff_t pos = 0;
-	kernel_read(filp, data, len, &pos);
+	kp_kernel_read(filp, data, len, &pos);
 	filp_close(filp, 0);
 	filp = 0;
 
@@ -1106,14 +1108,14 @@ int kp_kpm_init(void)
 	 * (EXECMEM_MODULE_TEXT). None are exported to modules, but all are in
 	 * kallsyms. kp_malloc_exec falls back module_alloc -> execmem_alloc ->
 	 * vmalloc. */
-	kp_module_alloc = (void *(*)(unsigned long))kallsyms_lookup_name("module_alloc");
-	kp_module_memfree = (void (*)(void *))kallsyms_lookup_name("module_memfree");
-	kp_execmem_alloc = (void *)kallsyms_lookup_name("execmem_alloc");
-	kp_execmem_free = (void *)kallsyms_lookup_name("execmem_free");
-	kp_flush_icache_all_fn = (void (*)(void))kallsyms_lookup_name("flush_icache_all");
-	kp_set_memory_x = (int (*)(unsigned long, int))kallsyms_lookup_name("set_memory_x");
-	kp_set_memory_nx = (int (*)(unsigned long, int))kallsyms_lookup_name("set_memory_nx");
-	kp_kpm_init_mm = (struct mm_struct *)kallsyms_lookup_name("init_mm");
+	kp_module_alloc = (void *(*)(unsigned long))kp_resolve_symbol("module_alloc");
+	kp_module_memfree = (void (*)(void *))kp_resolve_symbol("module_memfree");
+	kp_execmem_alloc = (void *)kp_resolve_symbol("execmem_alloc");
+	kp_execmem_free = (void *)kp_resolve_symbol("execmem_free");
+	kp_flush_icache_all_fn = (void (*)(void))kp_resolve_symbol("flush_icache_all");
+	kp_set_memory_x = (int (*)(unsigned long, int))kp_resolve_symbol("set_memory_x");
+	kp_set_memory_nx = (int (*)(unsigned long, int))kp_resolve_symbol("set_memory_nx");
+	kp_kpm_init_mm = (struct mm_struct *)kp_resolve_symbol("init_mm");
 	logki("kpm runtime: module_alloc=%px execmem_alloc=%px set_memory_x=%px init_mm=%px\n",
 	      kp_module_alloc, kp_execmem_alloc, kp_set_memory_x, kp_kpm_init_mm);
 
@@ -1142,7 +1144,7 @@ int kp_kpm_init(void)
 	}
 
 	kp_real_kallsyms_on_each_symbol =
-		(kp_kallsyms_on_each_symbol_t)kallsyms_lookup_name("kallsyms_on_each_symbol");
+		(kp_kallsyms_on_each_symbol_t)kp_resolve_symbol("kallsyms_on_each_symbol");
 	WRITE_ONCE(kp_kpm_ready, true);
 
 	logki("kpm loader ready (module_alloc=%px flush_icache_all=%px tramp=%px)\n", kp_module_alloc,

@@ -169,7 +169,7 @@ static int (*kp_kpm_kallsyms_on_each_symbol_fn)(
  * (*kf_name), so a KPM referencing e.g. strncat accesses the pointer-variable
  * symbol kf_strncat and needs a slot, populated from the running kernel. */
 #define KP_KPM_KFUNC_INIT(name) \
-	kf_##name = (typeof(kf_##name))kallsyms_lookup_name(#name)
+	kf_##name = (typeof(kf_##name))kp_resolve_symbol(#name)
 #define KP_KPM_KFUNC_ENTRY(name) \
 	{ "kf_" #name, (unsigned long)&kf_##name }
 
@@ -353,7 +353,7 @@ static struct kp_kpm_symbol kp_kpm_symbols[] = {
 int kp_kpm_symbols_init(void)
 {
 	kp_kpm_printk_fn = kp_kpm_printk;
-	kp_kpm_kallsyms_lookup_name_fn = kallsyms_lookup_name;
+	kp_kpm_kallsyms_lookup_name_fn = kp_resolve_symbol;
 	/* Route KPM kallsyms iteration through the bti-c trampoline + CFI shield
 	 * so Qualcomm's find_check_fn() panic and the BTI fault on bare-metal
 	 * callbacks are avoided. */
@@ -410,7 +410,7 @@ int kp_kpm_symbols_init(void)
 	/* arm64 GKI: syscalls go through __arm64_sys_* wrappers, so the KPM must
 	 * parse syscall args with the wrapper ABI (narg + 1). */
 	kp_kpm_has_syscall_wrapper = 0;
-	if (kallsyms_lookup_name("__arm64_sys_openat"))
+	if (kp_resolve_symbol("__arm64_sys_openat"))
 		kp_kpm_has_syscall_wrapper = 1;
 
 	logki("kpm stack facts: stack_in_task=%d stack_end=%d has_syscall_wrapper=%d\n",

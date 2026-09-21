@@ -24,6 +24,8 @@
 #include <linux/uaccess.h>
 
 #include "../include/kp_lkm.h"
+#include "../infra/kfuncs.h"
+#include "../infra/symbol_resolver.h"
 #include <hook.h>
 
 #define KP_PACKAGES_LIST "/data/system/packages.list"
@@ -71,7 +73,7 @@ static uid_t kp_lookup_package_uid(const char *package, int use_tmp)
 	char *buf, *cursor, *end;
 	uid_t uid = KP_INVALID_APPID;
 
-	fp = filp_open(path, O_RDONLY | O_NOFOLLOW, 0);
+	fp = kp_filp_open(path, O_RDONLY | O_NOFOLLOW, 0);
 	if (IS_ERR(fp)) {
 		logke("open %s failed: %ld\n", path, PTR_ERR(fp));
 		return KP_INVALID_APPID;
@@ -85,7 +87,7 @@ static uid_t kp_lookup_package_uid(const char *package, int use_tmp)
 		goto out_close;
 	{
 		loff_t pos = 0;
-		if (kernel_read(fp, buf, fsize, &pos) != fsize) {
+		if (kp_kernel_read(fp, buf, fsize, &pos) != fsize) {
 			kvfree(buf);
 			goto out_close;
 		}
@@ -193,7 +195,7 @@ static void kp_scan_apk_dir(const char *dir, int depth, bool *found, int use_tmp
 
 	if (*found)
 		return;
-	fp = filp_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+	fp = kp_filp_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
 	if (IS_ERR(fp))
 		return;
 	memset(&sc, 0, sizeof(sc));
@@ -315,13 +317,13 @@ void hook_rename_lsm(void)
 	unsigned long addr;
 	hook_err_t rc;
 
-	kp_dentry_path_raw = (kp_dentry_path_raw_t)kallsyms_lookup_name("dentry_path_raw");
+	kp_dentry_path_raw = (kp_dentry_path_raw_t)kp_resolve_symbol("dentry_path_raw");
 	if (!kp_dentry_path_raw) {
 		logkw("no symbol: dentry_path_raw\n");
 		return;
 	}
 
-	addr = kallsyms_lookup_name("security_path_rename");
+	addr = kp_resolve_symbol("security_path_rename");
 	if (addr) {
 		kp_rename_hook_addr = addr;
 		kp_rename_hook_cb = kp_after_security_path_rename;
@@ -330,7 +332,7 @@ void hook_rename_lsm(void)
 		return;
 	}
 
-	addr = kallsyms_lookup_name("security_inode_rename");
+	addr = kp_resolve_symbol("security_inode_rename");
 	if (addr) {
 		kp_rename_hook_addr = addr;
 		kp_rename_hook_cb = kp_after_security_inode_rename;

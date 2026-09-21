@@ -11,6 +11,7 @@
 #include "../include/kp_lkm.h"
 #include "../infra/patch_memory.h"
 #include "../infra/symbol_resolver.h"
+#include "../infra/kfuncs.h"
 #include "../infra/syscall_table.h"
 #include "../hook/hook_runtime.h"
 #include "../manager/manager.h"
@@ -61,7 +62,13 @@ int __init kernelpatch_init(void)
 
 	logki("KernelPatch LKM loading (version %x, kernel %x)\n", kpver, (unsigned)LINUX_VERSION_CODE);
 
-	kp_symres_init();
+	rc = kp_symres_init();
+	if (rc)
+		return rc;
+
+	rc = kp_kfuncs_init();
+	if (rc)
+		return rc;
 
 	rc = kp_syscall_table_init();
 	if (rc)

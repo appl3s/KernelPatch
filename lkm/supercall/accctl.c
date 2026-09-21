@@ -22,9 +22,7 @@
 
 #include "../include/kp_lkm.h"
 #include "../infra/symbol_resolver.h"
-
-/* security_secctx_to_secid is EXPORT_SYMBOL on 5.15 — link it directly. */
-extern int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);
+#include "../infra/kfuncs.h"
 
 /* selinux_blob_sizes is a global; resolve via kallsyms. cred->security is a
  * pointer to the LSM cred blob; the selinux part lives at +lbs_cred. */
@@ -40,6 +38,11 @@ struct kp_lsm_blob_sizes {
 
 static struct kp_lsm_blob_sizes *kp_selinux_blob_sizes;
 
+/* find_get_task_by_vpid is not exported to modules; resolved by name at
+ * kp_accctl_init and only called through this pointer. */
+typedef struct task_struct *(*kp_find_get_task_by_vpid_t)(pid_t nr);
+static kp_find_get_task_by_vpid_t kp_find_get_task_by_vpid;
+
 /* task_security_struct { osid, sid, ... } — RANDSTRUCT is off, so sid is the
  * second u32 (offset 4). */
 struct kp_task_sec {
@@ -49,6 +52,10 @@ struct kp_task_sec {
 
 int kp_accctl_init(void)
 {
+	kp_find_get_task_by_vpid = (kp_find_get_task_by_vpid_t)kp_resolve_symbol("find_get_task_by_vpid");
+	if (!kp_find_get_task_by_vpid)
+		logkw("failed to resolve find_get_task_by_vpid; task_su disabled\n");
+
 	kp_selinux_blob_sizes = (struct kp_lsm_blob_sizes *)kp_resolve_symbol("selinux_blob_sizes");
 	if (!kp_selinux_blob_sizes) {
 		logke("failed to resolve selinux_blob_sizes; selinux translabel disabled\n");
@@ -70,7 +77,7 @@ static int kp_selinux_set_cred_context(struct cred *new, const char *sctx)
 	if (!kp_selinux_blob_sizes || !sctx || !sctx[0])
 		return -EINVAL;
 
-	rc = security_secctx_to_secid(sctx, strlen(sctx), &sid);
+	rc = kp_security_secctx_to_secid(sctx, strlen(sctx), &sid);
 	if (rc || !sid) {
 		logkw("secctx_to_secid(%s) failed: %d sid=%u\n", sctx, rc, sid);
 		return rc ? rc : -EINVAL;
@@ -110,7 +117,7 @@ static void su_cred(struct cred *new, uid_t uid)
 __attribute__((no_sanitize("cfi")))
 static int commit_common_su(uid_t to_uid, const char *sctx)
 {
-	struct cred *new = prepare_creds();
+	struct cred *new = kp_prepare_creds();
 	if (!new)
 		return -ENOMEM;
 
@@ -125,12 +132,12 @@ static int commit_common_su(uid_t to_uid, const char *sctx)
 		int rc = kp_selinux_set_cred_context(new, sctx);
 		if (rc) {
 			logkw("selinux set context(%s) failed: %d\n", sctx, rc);
-			abort_creds(new);
+			kp_abort_creds(new);
 			return rc;
 		}
 	}
 
-	commit_creds(new);
+	kp_commit_creds(new);
 	return 0;
 }
 
@@ -160,7 +167,7 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 		struct cred *new = prepare_kernel_cred(NULL);
 		if (!new)
 			return -ENOMEM;
-		commit_creds(new);
+		kp_commit_creds(new);
 		logki("commit_su: to_uid=%u kernel cred (u:r:kernel:s0)\n", to_uid);
 		return 0;
 	}
@@ -173,7 +180,7 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 		struct cred *new = prepare_kernel_cred(NULL);
 		if (!new)
 			return -ENOMEM;
-		commit_creds(new);
+		kp_commit_creds(new);
 		return 0;
 	}
 	return 0;
@@ -185,13 +192,13 @@ int kp_task_su(pid_t pid, uid_t to_uid, const char *sctx)
 	const struct cred *old;
 	struct cred *new;
 
-	task = find_get_task_by_vpid(pid);
+	task = kp_find_get_task_by_vpid ? kp_find_get_task_by_vpid(pid) : NULL;
 	if (!task) {
 		logke("task_su: no task pid %d\n", pid);
 		return -ESRCH;
 	}
 
-	new = prepare_creds();
+	new = kp_prepare_creds();
 	if (!new) {
 		put_task_struct(task);
 		return -ENOMEM;

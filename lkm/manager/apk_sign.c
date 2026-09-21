@@ -59,7 +59,7 @@ static int read_exact(struct file *fp, void *buf, size_t size, loff_t *pos, loff
 {
 	if (*pos < 0 || *pos > end || size > (size_t)(end - *pos))
 		return -EINVAL;
-	return kernel_read(fp, buf, size, pos) == (ssize_t)size ? 0 : -EIO;
+	return kp_kernel_read(fp, buf, size, pos) == (ssize_t)size ? 0 : -EIO;
 }
 
 static int read_le32_bounded(struct file *fp, loff_t *pos, loff_t end, u32 *out)
@@ -204,7 +204,7 @@ static int apk_matches_digest(const char *path, const u8 *expected)
 	if (!path || !path[0])
 		return 0;
 
-	fp = filp_open(path, O_RDONLY | O_NOFOLLOW, 0);
+	fp = kp_filp_open(path, O_RDONLY | O_NOFOLLOW, 0);
 	if (IS_ERR(fp)) {
 		logkd("apk open failed %s: %ld\n", path, PTR_ERR(fp));
 		return 0;
