@@ -46,7 +46,13 @@ struct kp_kln_slot {
 	unsigned long magic;
 	unsigned long addr;
 };
-static struct kp_kln_slot kp_kln_slot = {
+/* volatile: force a real memory load at runtime so the compiler cannot
+ * constant-fold magic/addr to their initializers and dead-code-eliminate the
+ * slot (the addr is patched in the ELF file after compilation, which the
+ * compiler cannot see). __used: keep --gc-sections from dropping the now-only-
+ * referenced-by-volatile-read variable. Without these the magic never lands in
+ * the .ko and `grep KPLNSLOT` finds nothing. */
+static volatile __used struct kp_kln_slot kp_kln_slot = {
 	.magic = KP_KLN_MAGIC,
 	.addr = 0,
 };
