@@ -195,6 +195,8 @@ static void *(*kf_kmemdup)(const void *src, size_t len, gfp_t gfp);
 static char *(*kf_kasprintf)(gfp_t gfp, const char *fmt, ...);
 static void *(*kf_memchr)(const void *s, int c, size_t n);
 static char *(*kf_strcat)(char *dest, const char *src);
+static int (*kf_sscanf)(const char *buf, const char *fmt, ...);
+static char *(*kf_strsep)(char **s, const char *ct);
 
 /* mm_struct offsets (mirrors kpimg's linux/mm_types.h) */
 struct kp_kpm_mm_struct_offset {
@@ -257,6 +259,28 @@ static int kp_kpm_hook_compat_syscalln(int nr, int narg, void *before, void *aft
 static void kp_kpm_unhook_compat_syscalln(int nr, void *before, void *after)
 {
 	(void)nr; (void)before; (void)after;
+}
+
+/* fp_wrap_syscalln / fp_unwrap_syscalln: the patch-mode ABI KPMs are compiled
+ * against carries an explicit is_compat argument, whereas the LKM's own
+ * hook_syscalln/unhook_syscalln split the compat case into separate entry
+ * points. Dispatch here so a KPM calling the fp_wrap/fp_unwrap names resolves
+ * against the right backend. arm64 GKI has no compat table, so the compat path
+ * returns -ENOSYS (matches kp_kpm_hook_compat_syscalln). */
+static int kp_kpm_fp_wrap_syscalln(int nr, int narg, int is_compat, void *before,
+				   void *after, void *udata)
+{
+	if (is_compat)
+		return kp_kpm_hook_compat_syscalln(nr, narg, before, after, udata);
+	return kp_kpm_hook_syscalln(nr, narg, before, after, udata);
+}
+
+static void kp_kpm_fp_unwrap_syscalln(int nr, int is_compat, void *before, void *after)
+{
+	if (is_compat)
+		kp_kpm_unhook_compat_syscalln(nr, before, after);
+	else
+		kp_kpm_unhook_syscalln(nr, before, after);
 }
 
 /* task_pt_regs */
@@ -323,6 +347,8 @@ static struct kp_kpm_symbol kp_kpm_symbols[] = {
 	KP_KPM_KFUNC_ENTRY(kasprintf),
 	KP_KPM_KFUNC_ENTRY(memchr),
 	KP_KPM_KFUNC_ENTRY(strcat),
+	KP_KPM_KFUNC_ENTRY(sscanf),
+	KP_KPM_KFUNC_ENTRY(strsep),
 	{ "mm_struct_offset", (unsigned long)&kp_kpm_mm_struct_offset },
 	{ "has_config_compat", (unsigned long)&kp_kpm_has_config_compat },
 	{ "has_syscall_wrapper", (unsigned long)&kp_kpm_has_syscall_wrapper },
@@ -332,10 +358,14 @@ static struct kp_kpm_symbol kp_kpm_symbols[] = {
 	{ "unhook_syscalln", (unsigned long)kp_kpm_unhook_syscalln },
 	{ "hook_compat_syscalln", (unsigned long)kp_kpm_hook_compat_syscalln },
 	{ "unhook_compat_syscalln", (unsigned long)kp_kpm_unhook_compat_syscalln },
+	{ "fp_wrap_syscalln", (unsigned long)kp_kpm_fp_wrap_syscalln },
+	{ "fp_unwrap_syscalln", (unsigned long)kp_kpm_fp_unwrap_syscalln },
 	{ "syscalln_addr", (unsigned long)kp_kpm_syscalln_addr },
 	{ "syscalln_name_addr", (unsigned long)kp_kpm_syscalln_name_addr },
 	{ "_task_pt_reg", (unsigned long)kp_kpm_task_pt_reg },
 	{ "is_su_allow_uid", (unsigned long)kp_kpm_is_su_allow_uid },
+	{ "su_add_allow_uid", (unsigned long)kp_su_add_allow_uid },
+	{ "su_get_path", (unsigned long)kp_su_get_path },
 	{ "get_ap_mod_exclude", (unsigned long)kp_kpm_get_ap_mod_exclude },
 	{ "set_ap_mod_exclude", (unsigned long)kp_kpm_set_ap_mod_exclude },
 	{ "hotpatch_nosync", (unsigned long)kp_kpm_hotpatch_nosync },
@@ -381,6 +411,8 @@ int kp_kpm_symbols_init(void)
 	KP_KPM_KFUNC_INIT(kasprintf);
 	KP_KPM_KFUNC_INIT(memchr);
 	KP_KPM_KFUNC_INIT(strcat);
+	KP_KPM_KFUNC_INIT(sscanf);
+	KP_KPM_KFUNC_INIT(strsep);
 
 	/* mm_struct offsets (5.15 arm64) */
 	kp_kpm_mm_struct_offset.mmap_base_offset = offsetof(struct mm_struct, mmap_base);
