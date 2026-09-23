@@ -3,10 +3,12 @@
  * Copyright (C) 2023 bmax121. All Rights Reserved.
  *
  * Runtime symbol resolver. This kernel does NOT export kallsyms_lookup_name to
- * modules, so we must never link it: the load script reads its address from
- * /proc/kallsyms and passes it as the module_param `kln`. Every other symbol
- * is then recovered through kp_resolve_symbol(). kallsyms_on_each_symbol is
- * resolved by name for CFI/llvm-mangled variant matching.
+ * modules, so we must never link it: the kallsyms_lookup_name address is baked
+ * into the .ko via a binary-patchable slot (user/klnpatch.sh, reads
+ * /proc/kallsyms and overwrites the slot before insmod), or passed as the
+ * module_param `kln`. Every other symbol is then recovered through
+ * kp_resolve_symbol(). kallsyms_on_each_symbol is resolved by name for
+ * CFI/llvm-mangled variant matching.
  */
 #include "symbol_resolver.h"
 
@@ -30,9 +32,26 @@ typedef int (*kp_kallsyms_on_each_symbol_t)(int (*fn)(void *, const char *, stru
 					    void *data);
 #endif
 
-/* Bootstrap kallsyms_lookup_name address, passed by the load script as
- * `insmod kernelpatch.ko kln=0x<addr>` (from /proc/kallsyms). This is what
- * makes the .ko stable across boots: no ELF UND, no abs-patch. */
+/* Bootstrap kallsyms_lookup_name address.
+ *
+ * Primary mechanism: a binary-patchable slot. The .ko ships with addr=0; a
+ * host/device patcher (user/klnpatch) finds the magic by byte-scan and
+ * overwrites the addr field with the real kallsyms_lookup_name address (from
+ * /proc/kallsyms), so `insmod kernelpatch.ko` needs no parameter. The magic
+ * is 0x544f4c534e4c504b, whose little-endian file bytes spell "KPLNSLOT".
+ *
+ * Fallback: the `kln` module_param still works if passed explicitly. */
+#define KP_KLN_MAGIC 0x544f4c534e4c504bUL
+struct kp_kln_slot {
+	unsigned long magic;
+	unsigned long addr;
+};
+static struct kp_kln_slot kp_kln_slot = {
+	.magic = KP_KLN_MAGIC,
+	.addr = 0,
+};
+
+/* Optional module_param fallback (kpimg-style / scripted loads). */
 static unsigned long kln_addr;
 module_param_named(kln, kln_addr, ulong, 0);
 
@@ -116,14 +135,23 @@ void *kp_resolve_symbol_variant(const char *name)
 
 int kp_symres_init(void)
 {
-	if (!kln_addr) {
-		logke("kln= module_param missing; pass kallsyms_lookup_name address "
-		      "from /proc/kallsyms (insmod kernelpatch.ko kln=0x<addr>)\n");
+	unsigned long addr = 0;
+
+	/* Binary-patched slot takes precedence. */
+	if (kp_kln_slot.magic == KP_KLN_MAGIC && kp_kln_slot.addr)
+		addr = kp_kln_slot.addr;
+	/* Optional module_param fallback. */
+	else if (kln_addr)
+		addr = kln_addr;
+
+	if (!addr) {
+		logke("kln missing: patch the .ko (user/klnpatch <kernelpatch.ko>) "
+		      "or pass kln=0x<addr> (insmod kernelpatch.ko kln=0x<addr>)\n");
 		return -EINVAL;
 	}
-	kp_kln = (unsigned long (*)(const char *))kln_addr;
+	kp_kln = (unsigned long (*)(const char *))addr;
 	kp_on_each_symbol = (kp_kallsyms_on_each_symbol_t)kp_resolve_symbol("kallsyms_on_each_symbol");
 	logki("symbol resolver ready (kln=%px on_each_symbol=%px)\n",
-	      (void *)kln_addr, (void *)kp_on_each_symbol);
+	      (void *)addr, (void *)kp_on_each_symbol);
 	return 0;
 }
