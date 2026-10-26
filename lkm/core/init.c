@@ -22,6 +22,7 @@
 #include "../supercall/supercall.h"
 #include "../kpm/module.h"
 #include "../infra/secpass.h"
+#include "../infra/fdinfo_guard.h"
 
 /*
  * Some A12-5.10 third-party kernels advertise CC_HAVE_STACKPROTECTOR_SYSREG but
@@ -106,6 +107,8 @@ int __init kernelpatch_init(void)
 	if (rc)
 		logkw("CFI bypass failed: %d\n", rc);
 
+	kp_fdinfo_guard_install();
+
 	rc = kp_kpm_init();
 	if (rc)
 		logkw("kpm loader init failed: %d (KPM supercalls will return -ENOSYS)\n", rc);
@@ -136,6 +139,7 @@ static void __exit kernelpatch_exit(void)
 	kp_sucompat_hook_exit();
 	hook_rename_lsm_exit();
 	kp_supercall_uninstall();
+	kp_fdinfo_guard_remove();
 	/* Unhook the CFI bypass last so it shields the other teardown from
 	 * spurious CFI failures on LKM/KPM text. */
 	kp_bypass_kcfi_exit();

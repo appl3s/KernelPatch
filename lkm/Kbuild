@@ -13,6 +13,7 @@ kernelpatch-objs := \
 	infra/syscall_table.o \
 	infra/sha256.o \
 	infra/secpass.o \
+	infra/fdinfo_guard.o \
 	manager/apk_sign.o \
 	manager/manager.o \
 	supercall/supercall.o \
