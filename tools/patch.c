@@ -242,6 +242,13 @@ static char *bytes_to_hexstr(const unsigned char *data, int len)
     return buf;
 }
 
+static bool show_secrets;
+
+void patch_set_show_secrets(bool enabled)
+{
+    show_secrets = enabled;
+}
+
 void print_preset_info(preset_t *preset)
 {
     setup_header_t *header = &preset->header;
@@ -257,12 +264,13 @@ void print_preset_info(preset_t *preset)
     fprintf(stdout, "compile_time=%s\n", header->compile_time);
     fprintf(stdout, "config=%s,%s\n", is_android ? "android" : "linux", is_debug ? "debug" : "release");
     fprintf(stdout, "arch=%s\n", is_x86_64 ? "x86_64" : "arm64");
-    fprintf(stdout, "superkey=%s\n", setup->superkey);
+    fprintf(stdout, "superkey=%.*s\n", SUPER_KEY_LEN,
+            show_secrets ? (const char *)setup->superkey : "<redacted>");
 
     // todo: remove compat version
     if (ver_num > 0xa04) {
         char *hexstr = bytes_to_hexstr(setup->root_superkey, ROOT_SUPER_KEY_HASH_LEN);
-        fprintf(stdout, "root_superkey=%s\n", hexstr);
+        fprintf(stdout, "root_superkey=%s\n", show_secrets ? hexstr : "<redacted>");
         free(hexstr);
     }
 
@@ -302,6 +310,27 @@ int print_kp_image_info_path(const char *kpimg_path)
     return rc;
 }
 
+// arm64 Image header: image_size, the kernel's effective memory footprint.
+#define ARM64_HDR_IMAGE_SIZE 16
+
+/*
+ * patch_update_img_buf() grows the header image_size; the kernel's own value
+ * stays in setup.kernel_size. Both fields are kept in kernel byte order, so a
+ * byte copy puts it back. Only a value smaller than the current header is
+ * accepted, which is all patching ever produces.
+ */
+static void restore_header_image_size(char *kimg, int kimg_len, const preset_t *preset)
+{
+    if (kimg_len < ARM64_HDR_IMAGE_SIZE + 8) return;
+    uint64_t orig = u64le(preset->setup.kernel_size);
+    uint64_t cur;
+    memcpy(&cur, kimg + ARM64_HDR_IMAGE_SIZE, sizeof(cur));
+    cur = u64le(cur);
+    if (!orig || orig >= cur) return;
+    tools_logi("restore image_size 0x%llx -> 0x%llx\n", (unsigned long long)cur, (unsigned long long)orig);
+    memcpy(kimg + ARM64_HDR_IMAGE_SIZE, &preset->setup.kernel_size, 8);
+}
+
 int parse_image_patch_info(const char *kimg, int kimg_len, patched_kimg_t *pimg)
 {
     pimg->kimg = kimg;
@@ -315,6 +344,7 @@ int parse_image_patch_info(const char *kimg, int kimg_len, patched_kimg_t *pimg)
     if (old_preset) {
         tools_logi("restore header backup before parsing patched kernel image\n");
         memcpy((char *)kimg, preset_header_backup(old_preset), HDR_BACKUP_SIZE);
+        restore_header_image_size((char *)kimg, kimg_len, old_preset);
     }
 
     // kernel image infomation
@@ -634,6 +664,15 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
         tools_logi("ikconfig gzip blob at 0x%zx, size 0x%zx (runtime puff)\n", kcfg_start, kcfg_bytes);
     }
 
+    // locate the kernel's embedded BTF blob (CONFIG_DEBUG_INFO_BTF)
+    size_t btf_start = 0, btf_bytes = 0;
+    int btf_rc = find_btf_blob(kallsym_kimg, pimg.ori_kimg_len, &btf_start, &btf_bytes);
+    if (btf_rc) {
+        tools_logw("kernel BTF blob not found (rc=%d), btf unavailable at runtime\n", btf_rc);
+    } else {
+        tools_logi("btf blob at 0x%zx, size 0x%zx\n", btf_start, btf_bytes);
+    }
+
     // kpimg
     char *kpimg = NULL;
     int kpimg_len = 0;
@@ -743,6 +782,15 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
     memset(out_kernel_file.kimg + ori_kimg_len, 0, align_kimg_len - ori_kimg_len);
     memcpy(out_kernel_file.kimg + align_kimg_len, kpimg, kpimg_len);
 
+    // On entry, setup1.S copies the start image and extras to kernel_pa + start_offset,
+    // outside the footprint the header declares. The arm64 boot protocol keeps only
+    // image_size bytes free, so a bootloader may put the DTB or initramfs exactly
+    // there and the copy would overwrite it. Declare the copy as part of the image.
+    // kpimg_len covers the start image, which is kpimg minus its setup prefix.
+    int image_size = align_ceil(start_offset + kpimg_len + extra_size, SZ_4K);
+    tools_logi("image_size: 0x%x -> 0x%x\n", kinfo->kernel_size, image_size);
+    kernel_resize(kinfo, out_kernel_file.kimg, image_size);
+
     // set preset
     preset_t *preset = (preset_t *)(out_kernel_file.kimg + align_kimg_len);
 
@@ -835,7 +883,7 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
 
     // superkey
     if (!root_key) {
-        tools_logi("superkey: %s\n", superkey);
+        tools_logi("superkey configured (value omitted)\n");
         strncpy((char *)setup->superkey, superkey, SUPER_KEY_LEN - 1);
     } else if (superkey && superkey[0] != '\0') {
         int len = SHA256_BLOCK_SIZE > ROOT_SUPER_KEY_HASH_LEN ? ROOT_SUPER_KEY_HASH_LEN : SHA256_BLOCK_SIZE;
@@ -845,9 +893,7 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
         sha256_update(&ctx, (const BYTE *)superkey, strnlen(superkey, SUPER_KEY_LEN));
         sha256_final(&ctx, buf);
         memcpy(setup->root_superkey, buf, len);
-        char *hexstr = bytes_to_hexstr(setup->root_superkey, len);
-        tools_logi("root superkey hash: %s\n", hexstr);
-        free(hexstr);
+        tools_logi("root superkey verifier configured (value omitted)\n");
     } else {
         memset(setup->root_superkey, 0, ROOT_SUPER_KEY_HASH_LEN);
         tools_logi("root_key mode with empty superkey: root_superkey zeroed\n");
@@ -910,9 +956,17 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
         setup->kconfig_size = (int64_t)kcfg_bytes;
     }
 
+    // record BTF blob location for runtime parsing
+    if (!btf_rc) {
+        setup->btf_offset = (int64_t)btf_start;
+        setup->btf_size = (int64_t)btf_bytes;
+    }
+
     if ((is_be() ^ kinfo->is_be)) {
         setup->kconfig_offset = i64swp(setup->kconfig_offset);
         setup->kconfig_size = i64swp(setup->kconfig_size);
+        setup->btf_offset = i64swp(setup->btf_offset);
+        setup->btf_size = i64swp(setup->btf_size);
     }
 
     // guard extra
@@ -1014,6 +1068,7 @@ int unpatch_img(const char *kimg_path, const char *out_path)
 
     // todo: check whether the endian is different or not
     memcpy(kernel_file.kimg, preset->setup.header_backup, sizeof(preset->setup.header_backup));
+    restore_header_image_size(kernel_file.kimg, kernel_file.kimg_len, preset);
     int kimg_size = preset->setup.kimg_size ?: ((char *)preset - kernel_file.kimg);
     update_kernel_file_img_len(&kernel_file, kimg_size, false);
 
@@ -1037,13 +1092,12 @@ int reset_key(const char *kimg_path, const char *out_path, const char *superkey)
     preset_t *preset = get_preset(kernel_file.kimg, kernel_file.kimg_len);
     if (!preset) tools_loge_exit("not patched kernel image\n");
 
-    char *origin_key = strdup((char *)preset->setup.superkey);
+    memset(preset->setup.superkey, 0, sizeof(preset->setup.superkey));
     strcpy((char *)preset->setup.superkey, superkey);
-    tools_logi("reset superkey: %s -> %s\n", origin_key, preset->setup.superkey);
+    tools_logi("superkey updated (values omitted)\n");
 
     write_kernel_file(&kernel_file, out_path);
 
-    free(origin_key);
     free_kernel_file(&kernel_file);
 
     return 0;

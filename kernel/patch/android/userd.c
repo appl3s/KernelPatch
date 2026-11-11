@@ -140,7 +140,6 @@ static const char user_rc_data[] = { //
     "on property:sys.boot_completed=1\n"
     "    exec -- " SUPERCMD " su -Z " MAGISK_SCTX " exec " APD_PATH " -s %s boot-completed\n"
     "    exec -- " SUPERCMD " su event boot-completed\n"
-    "    exec -- " SUPERCMD " su -Z " MAGISK_SCTX " exec " APD_PATH " uid-listener &\n"
     "    rm " REPLACE_RC_FILE "\n"
     "    exec -- " SUPERCMD " su -Z " MAGISK_SCTX " -c \"mv -f " DEV_LOG_DIR " " AP_LOG_DIR "\"\n"
     ""
@@ -1741,9 +1740,9 @@ static void after_execveat(hook_fargs5_t *args, void *udata)
 static void before_openat(hook_fargs4_t *args, void *udata)
 {
     
-    // cp len
+    // redirected flag
     args->local.data0 = 0;
-    // cp ptr
+    // original filename argument
     args->local.data1 = 0;
     // unhook flag
     args->local.data2 = 0;
@@ -1757,7 +1756,7 @@ static void before_openat(hook_fargs4_t *args, void *udata)
     const char __user *filename = (typeof(filename))syscall_argn(args, 1);
     char buf[256];
     long rc = compat_strncpy_from_user(buf, filename, sizeof(buf));
-    if (rc <= 0) return;
+    if (rc <= 0 || rc >= sizeof(buf)) return;
 
     int file_count = sizeof(ORIGIN_RC_FILES) / sizeof(ORIGIN_RC_FILES[0]);
     for (int i = 0; i < file_count; i++) {
@@ -1786,7 +1785,7 @@ static void before_openat(hook_fargs4_t *args, void *udata)
 
     loff_t off = 0;
     const char *ori_rc_data = kernel_read_file(origin_rc, &ori_len);
-    if (!ori_rc_data) goto out;
+    if (!ori_rc_data) goto free;
     kernel_write(newfp, ori_rc_data, ori_len, &off);
     if (off != ori_len) {
         log_boot("write replace rc error: %x\n", off);
@@ -1807,17 +1806,20 @@ static void before_openat(hook_fargs4_t *args, void *udata)
         goto free;
     }
 
-    int cplen = 0;
-    cplen = compat_copy_to_user((void *)filename, REPLACE_RC_FILE, sizeof(REPLACE_RC_FILE));
-    if (cplen > 0) {
-        args->local.data0 = cplen;
-        args->local.data1 = (uint64_t)args->arg1;
-        log_boot("redirect rc file: %x\n", args->local.data0);
-    } else {
-        void *__user up = copy_to_user_stack(REPLACE_RC_FILE, sizeof(REPLACE_RC_FILE));
-        args->arg1 = (uint64_t)up;
-        log_boot("redirect rc file stack: %llx\n", up);
+    /* Never overwrite init's filename allocation: /init.rc is shorter than
+     * REPLACE_RC_FILE, and the 64-byte table entries are not buffer sizes. */
+    uintptr_t sp = current_user_stack_pointer();
+    if (sp < sizeof(REPLACE_RC_FILE)) goto free;
+    sp = (sp - sizeof(REPLACE_RC_FILE)) & ~(uintptr_t)15;
+    int cplen = compat_copy_to_user((void *__user)sp, REPLACE_RC_FILE, sizeof(REPLACE_RC_FILE));
+    if (cplen != sizeof(REPLACE_RC_FILE)) {
+        log_boot("redirect rc file copy error: %d\n", cplen);
+        goto free;
     }
+    args->local.data0 = 1;
+    args->local.data1 = syscall_argn(args, 1);
+    set_syscall_argn(args, 1, sp);
+    log_boot("redirect rc file stack: %llx\n", sp);
 
 free:
     filp_close(newfp, 0);
@@ -1830,14 +1832,9 @@ out:
 
 static void after_openat(hook_fargs4_t *args, void *udata)
 {
-    if (args->local.data0 && args->local.data3 > 0) {
-        
-        const char *origin_rc = ORIGIN_RC_FILES[args->local.data3 - 1];
-        compat_copy_to_user(
-            (void *)args->local.data1,
-            origin_rc,
-            sizeof(ORIGIN_RC_FILES[args->local.data3 - 1]));
-        log_boot("restore rc file: %x\n", args->local.data0);
+    if (args->local.data0) {
+        set_syscall_argn(args, 1, args->local.data1);
+        log_boot("redirect rc file open result: %ld\n", (long)args->ret);
     }
     if (args->local.data2) {
         unhook_syscalln(__NR_openat, before_openat, after_openat);
@@ -1885,6 +1882,57 @@ static void after_security_inode_rename(hook_fargs5_t *args, void *udata)
     }
 }
 
+// int selinux_inode_rename(struct inode *old_inode, struct dentry *old_dentry,
+//                          struct inode *new_inode, struct dentry *new_dentry)
+static void after_selinux_inode_rename(hook_fargs4_t *args, void *udata)
+{
+    if ((int)args->ret >= 0) {
+        refresh_packages_list_tmp_rename((struct dentry *)args->arg1);
+    }
+}
+
+typedef int (*kp_kallsyms_lookup_size_offset_t)(unsigned long addr, unsigned long *symbolsize, unsigned long *offset);
+
+/* 1 if the body of caller_name branches (B or BL) to callee, 0 if it does not,
+ * -1 if that cannot be determined. LTO can inline an LSM wrapper into its
+ * caller and leave the out-of-line copy, still listed in kallsyms, uncalled. */
+static int calls_directly(const char *caller_name, unsigned long callee)
+{
+    kp_kallsyms_lookup_size_offset_t lookup_size_offset;
+    unsigned long caller, size = 0, offset = 0, pc;
+
+    lookup_size_offset = (kp_kallsyms_lookup_size_offset_t)kallsyms_lookup_name("kallsyms_lookup_size_offset");
+    caller = kallsyms_lookup_name(caller_name);
+    if (!lookup_size_offset || !caller || !lookup_size_offset(caller, &size, &offset) || offset || !size) return -1;
+
+    for (pc = caller; pc + 4 <= caller + size; pc += 4) {
+        uint32_t insn = *(uint32_t *)pc;
+        // B is 0b000101 and BL is 0b100101 in bits [31:26]. Bit 31 is the link
+        // bit, so masking it out (0x7c000000) leaves 0x14000000 for both.
+        if ((insn & 0x7c000000) != 0x14000000) continue;
+        // imm26 in bits [25:0] is a signed offset in instructions. Shifting
+        // left by 38 moves its sign bit to bit 63; the arithmetic shift right
+        // by 36 then sign-extends it and multiplies by 4 to get bytes.
+        if (pc + ((int64_t)((uint64_t)insn << 38) >> 36) == callee) return 1;
+    }
+    return 0;
+}
+
+static int hook_rename_wrapper(const char *name, const char *caller_name, hook_chain5_callback after)
+{
+    unsigned long addr = kallsyms_lookup_name(name);
+    hook_err_t rc;
+
+    if (!addr) return -ENOENT;
+    if (!calls_directly(caller_name, addr)) {
+        log_boot("%s is inlined into %s\n", name, caller_name);
+        return -ENOENT;
+    }
+    rc = hook_wrap5((void *)addr, 0, after, 0);
+    log_boot("hook %s rc: %d\n", name, rc);
+    return 0;
+}
+
 static void hook_rename_lsm(void)
 {
     unsigned long addr;
@@ -1896,21 +1944,17 @@ static void hook_rename_lsm(void)
         return;
     }
 
-    addr = kallsyms_lookup_name("security_path_rename");
-    if (addr) {
-        rc = hook_wrap5((void *)addr, 0, after_security_path_rename, 0);
-        log_boot("hook security_path_rename rc: %d\n", rc);
+    if (!hook_rename_wrapper("security_path_rename", "do_renameat2", after_security_path_rename)) return;
+    if (!hook_rename_wrapper("security_inode_rename", "vfs_rename", after_security_inode_rename)) return;
+
+    // Reached only through the LSM hook table, so it cannot be inlined away.
+    addr = kallsyms_lookup_name("selinux_inode_rename");
+    if (!addr) {
+        log_boot("no symbol: security_path_rename/security_inode_rename/selinux_inode_rename\n");
         return;
     }
-
-    addr = kallsyms_lookup_name("security_inode_rename");
-    if (addr) {
-        rc = hook_wrap5((void *)addr, 0, after_security_inode_rename, 0);
-        log_boot("hook security_inode_rename rc: %d\n", rc);
-        return;
-    }
-
-    log_boot("no symbol: security_path_rename/security_inode_rename\n");
+    rc = hook_wrap4((void *)addr, 0, after_selinux_inode_rename, 0);
+    log_boot("hook selinux_inode_rename rc: %d\n", rc);
 }
 
 #define EV_KEY 0x01
